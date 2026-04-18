@@ -6,7 +6,7 @@ export interface Project {
 
 export type CreateProjectDTO = Omit<Project, 'id'>;
 
-const STORAGE_KEY = 'manageme_prjects';
+const STORAGE_KEY = 'manageme_projects';
 
 export class ProjectService
     {
