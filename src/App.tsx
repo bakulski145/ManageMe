@@ -3,9 +3,9 @@ import { ProjectService, type Project } from './api/ProjectService'
 import { UserService, type User } from './api/UserService';
 import { StoryService, type Story, type Priority, type Status } from './api/StoryService';
 import { TaskService, type Task } from './api/TaskService';
+import { NotificationService, type Notification, type NotificationPriority } from './api/NotificationService';
 
 function App() {
-  // --- ZARZĄDZANIE MOTYWEM (DARK/LIGHT MODE) ---
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
 
   const [projects, setProjects] = useState<Project[]>([]);
@@ -31,53 +31,68 @@ function App() {
   const [taskCzas, setTaskCzas] = useState<number>(1);
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
 
-  // Inicjalizacja przy starcie aplikacji
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [showToast, setShowToast] = useState<Notification | null>(null);
+  
+  const [isNotificationsViewActive, setIsNotificationsViewActive] = useState(false);
+  const [selectedNotification, setSelectedNotification] = useState<Notification | null>(null);
+
   useEffect(() => {
     loadProjects();
-    setCurrentUser(UserService.getLoggedUser());
+    const loggedUser = UserService.getLoggedUser();
+    setCurrentUser(loggedUser);
     setUsers(UserService.getAllUsers());
     
-    // Wczytanie motywu z localStorage
     const savedTheme = localStorage.getItem('manageme_theme') as 'light' | 'dark' | null;
-    if (savedTheme) {
-      setTheme(savedTheme);
+    if (savedTheme) setTheme(savedTheme);
+
+    if (loggedUser) {
+      loadNotifications(loggedUser.id);
     }
   }, []);
 
-  // Aktualizacja atrybutu w HTML i zapis w localStorage przy każdej zmianie
   useEffect(() => {
     document.documentElement.setAttribute('data-bs-theme', theme);
     localStorage.setItem('manageme_theme', theme);
   }, [theme]);
 
-  useEffect(() => {
-    if (activeProject) {
-      loadStories();
-    }
-  }, [activeProject]);
+  useEffect(() => { if (activeProject) loadStories(); }, [activeProject]);
+  useEffect(() => { if (activeStory) loadTasks(); }, [activeStory]);
 
-  useEffect(() => {
-    if (activeStory) {
-      loadTasks();
-    }
-  }, [activeStory]);
-
-  const loadProjects = async () => {
-    const data = await ProjectService.getAll();
-    setProjects(data);
-  }
-
-  const loadStories = async () => {
-    if (!activeProject) return;
-    const data = await StoryService.getByProject(activeProject.id);
-    setStories(data);
+  const loadNotifications = async (userId: string) => {
+    const data = await NotificationService.getByRecipient(userId);
+    setNotifications(data);
   };
 
-  const loadTasks = async () => {
-    if (!activeStory) return;
-    const data = await TaskService.getByStory(activeStory.id);
-    setTasks(data);
+  const notifyUser = async (recipientId: string, title: string, message: string, priority: NotificationPriority) => {
+    const newNotif = await NotificationService.create({ title, message, priority, recipientId });
+    
+    if (currentUser && currentUser.id === recipientId) {
+      await loadNotifications(currentUser.id);
+      if (priority === 'medium' || priority === 'high') {
+        setShowToast(newNotif);
+        setTimeout(() => setShowToast(null), 5000);
+      }
+    }
   };
+
+  const handleNotificationClick = async (notif: Notification) => {
+    if (!notif.isRead) {
+      await NotificationService.markAsRead(notif.id);
+      if (currentUser) loadNotifications(currentUser.id);
+    }
+    setSelectedNotification(notif);
+  };
+
+  const handleMarkAsRead = async (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    await NotificationService.markAsRead(id);
+    if (currentUser) loadNotifications(currentUser.id);
+  };
+
+  const loadProjects = async () => { setProjects(await ProjectService.getAll()); }
+  const loadStories = async () => { if (activeProject) setStories(await StoryService.getByProject(activeProject.id)); };
+  const loadTasks = async () => { if (activeStory) setTasks(await TaskService.getByStory(activeStory.id)); };
 
   const updateStoryStatusIfNeeded = async (storyId: string) => {
     const storyTasks = await TaskService.getByStory(storyId);
@@ -107,17 +122,16 @@ function App() {
       setEditingId(null);
     } else {
       await ProjectService.create({ nazwa, opis });
+      const admins = users.filter(u => u.rola === 'admin');
+      for (const admin of admins) {
+        await notifyUser(admin.id, 'Utworzono nowy projekt', `Został utworzony projekt o nazwie: "${nazwa}"`, 'high');
+      }
     }
     setNazwa(''); setOpis(''); await loadProjects();
   };
 
-  const handleDelete = async (id: string) => {
-    await ProjectService.delete(id); await loadProjects();
-  };
-
-  const handleEdit = (project: Project) => {
-    setEditingId(project.id); setNazwa(project.nazwa); setOpis(project.opis);
-  };
+  const handleDelete = async (id: string) => { await ProjectService.delete(id); await loadProjects(); };
+  const handleEdit = (project: Project) => { setEditingId(project.id); setNazwa(project.nazwa); setOpis(project.opis); };
 
   const handleStorySubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -126,20 +140,13 @@ function App() {
       await StoryService.update(editingStoryId, { nazwa: storyNazwa, opis: storyOpis, priorytet: storyPriorytet });
       setEditingStoryId(null);
     } else {
-      await StoryService.create({
-        nazwa: storyNazwa, opis: storyOpis, priorytet: storyPriorytet, projektId: activeProject.id, stan: 'todo', wlascicielId: currentUser.id
-      });
+      await StoryService.create({ nazwa: storyNazwa, opis: storyOpis, priorytet: storyPriorytet, projektId: activeProject.id, stan: 'todo', wlascicielId: currentUser.id });
     }
     setStoryNazwa(''); setStoryOpis(''); setStoryPriorytet('niski'); await loadStories();
   };
 
-  const handleDeleteStory = async (id: string) => {
-    await StoryService.delete(id); await loadStories();
-  };
-
-  const handleEditStory = (story: Story) => {
-    setEditingStoryId(story.id); setStoryNazwa(story.nazwa); setStoryOpis(story.opis); setStoryPriorytet(story.priorytet);
-  };
+  const handleDeleteStory = async (id: string) => { await StoryService.delete(id); await loadStories(); };
+  const handleEditStory = (story: Story) => { setEditingStoryId(story.id); setStoryNazwa(story.nazwa); setStoryOpis(story.opis); setStoryPriorytet(story.priorytet); };
 
   const handleTaskSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -148,46 +155,43 @@ function App() {
       await TaskService.update(editingTaskId, { nazwa: taskNazwa, opis: taskOpis, priorytet: taskPriorytet, przewidywanyCzas: taskCzas });
       setEditingTaskId(null);
     } else {
-      await TaskService.create({
-        nazwa: taskNazwa, opis: taskOpis, priorytet: taskPriorytet, przewidywanyCzas: taskCzas, storyId: activeStory.id
-      });
+      await TaskService.create({ nazwa: taskNazwa, opis: taskOpis, priorytet: taskPriorytet, przewidywanyCzas: taskCzas, storyId: activeStory.id });
+      await notifyUser(activeStory.wlascicielId, 'Nowe zadanie', `W historyjce "${activeStory.nazwa}" dodano zadanie "${taskNazwa}"`, 'medium');
     }
-    setTaskNazwa(''); setTaskOpis(''); setTaskPriorytet('niski'); setTaskCzas(1);
-    await loadTasks();
-    await updateStoryStatusIfNeeded(activeStory.id);
+    setTaskNazwa(''); setTaskOpis(''); setTaskPriorytet('niski'); setTaskCzas(1); await loadTasks(); await updateStoryStatusIfNeeded(activeStory.id);
   };
 
   const handleAssignTask = async (taskId: string, userId: string) => {
     if (!userId) return;
-    await TaskService.update(taskId, {
-      przypisanyUzytkownikId: userId,
-      stan: 'doing',
-      dataStartu: new Date().toISOString()
-    });
-    await loadTasks();
-    await updateStoryStatusIfNeeded(activeStory!.id);
+    const task = tasks.find(t => t.id === taskId);
+    await TaskService.update(taskId, { przypisanyUzytkownikId: userId, stan: 'doing', dataStartu: new Date().toISOString() });
+    await loadTasks(); await updateStoryStatusIfNeeded(activeStory!.id);
+    if (task) {
+      await notifyUser(userId, 'Przypisanie do zadania', `Zostałeś przypisany do zadania "${task.nazwa}"`, 'high');
+    }
   };
 
   const handleChangeTaskStatus = async (taskId: string, nowyStan: Status) => {
+    const task = tasks.find(t => t.id === taskId);
     const updates: Partial<Task> = { stan: nowyStan };
-    if (nowyStan === 'done') {
-      updates.dataZakonczenia = new Date().toISOString();
+    if (nowyStan === 'done') updates.dataZakonczenia = new Date().toISOString();
+    await TaskService.update(taskId, updates); await loadTasks(); await updateStoryStatusIfNeeded(activeStory!.id);
+    
+    if (task && activeStory) {
+      const prio = nowyStan === 'done' ? 'medium' : 'low';
+      await notifyUser(activeStory.wlascicielId, 'Zaktualizowano zadanie', `Zadanie "${task.nazwa}" zmieniło status na: ${nowyStan.toUpperCase()}`, prio);
     }
-    await TaskService.update(taskId, updates);
-    await loadTasks();
-    await updateStoryStatusIfNeeded(activeStory!.id);
   };
 
-  const handleDeleteTask = async (id: string) => {
-    await TaskService.delete(id);
-    await loadTasks();
-    await updateStoryStatusIfNeeded(activeStory!.id);
+  const handleDeleteTask = async (id: string) => { 
+    const task = tasks.find(t => t.id === id);
+    await TaskService.delete(id); await loadTasks(); await updateStoryStatusIfNeeded(activeStory!.id); 
+    if (task && activeStory) {
+      await notifyUser(activeStory.wlascicielId, 'Usunięto zadanie', `Zadanie "${task.nazwa}" zostało usunięte z historyjki.`, 'medium');
+    }
   };
 
-  const handleEditTask = (task: Task) => {
-    setEditingTaskId(task.id); setTaskNazwa(task.nazwa); setTaskOpis(task.opis);
-    setTaskPriorytet(task.priorytet); setTaskCzas(task.przewidywanyCzas);
-  };
+  const handleEditTask = (task: Task) => { setEditingTaskId(task.id); setTaskNazwa(task.nazwa); setTaskOpis(task.opis); setTaskPriorytet(task.priorytet); setTaskCzas(task.przewidywanyCzas); };
 
   const getUserName = (id: string) => {
     const u = users.find(user => user.id === id);
@@ -199,43 +203,124 @@ function App() {
     if (priority === 'średni') return 'bg-warning text-dark';
     return 'bg-success';
   };
+  
+  const getNotifBadgeClass = (priority: NotificationPriority) => {
+    if (priority === 'high') return 'bg-danger';
+    if (priority === 'medium') return 'bg-warning text-dark';
+    return 'bg-secondary';
+  };
+
+  const unreadCount = notifications.filter(n => !n.isRead).length;
 
   return (
     <div className="container py-4">
       <header className="d-flex justify-content-between align-items-center border-bottom pb-3 mb-4">
-        <h1 className="h3 mb-0 text-primary">ManageMe</h1>
+        <h1 className="h3 mb-0 text-primary" style={{ cursor: 'pointer' }} onClick={() => setIsNotificationsViewActive(false)}>ManageMe</h1>
         
         <div className="d-flex align-items-center gap-3">
-          {/* PRZYCISK ZMIANY MOTYWU */}
-          <button 
-            className={`btn btn-sm ${theme === 'light' ? 'btn-dark' : 'btn-light'}`}
-            onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
-          >
-            {theme === 'light' ? '🌙 Ciemny' : '☀️ Jasny'}
+          <button className={`btn btn-sm ${theme === 'light' ? 'btn-dark' : 'btn-light'}`} onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}>
+            {theme === 'light' ? 'Ciemny' : 'Jasny'}
           </button>
 
           {currentUser && (
-            <div className="text-muted d-none d-md-block">
+            <div className="d-flex align-items-center gap-1">
+               <button 
+                className="btn btn-outline-secondary position-relative border-0 fs-5" 
+                onClick={() => { setIsNotificationsViewActive(true); setSelectedNotification(null); }}
+                title="Powiadomienia"
+              >
+                🔔
+                {unreadCount > 0 && (
+                  <span className="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger" style={{ fontSize: '0.65rem' }}>
+                    {unreadCount > 99 ? '99+' : unreadCount}
+                    <span className="visually-hidden">nieprzeczytane</span>
+                  </span>
+                )}
+              </button>
+            </div>
+          )}
+
+          {currentUser && (
+            <div className="text-muted d-none d-md-block ms-2">
               Zalogowany: <strong className="fw-bold text-body">{currentUser.imie} {currentUser.nazwisko} ({currentUser.rola})</strong>
             </div>
           )}
         </div>
       </header>
 
-      {/* WIDOK 1: Lista Projektów */}
-      {!activeProject ? (
+      {isNotificationsViewActive ? (
+        
+        <div className="row justify-content-center">
+          <div className="col-md-8">
+            <div className="d-flex justify-content-between align-items-center mb-4">
+              <h2 className="h4 mb-0">Powiadomienia</h2>
+              <button className="btn btn-outline-secondary btn-sm" onClick={() => { setIsNotificationsViewActive(false); setSelectedNotification(null); }}>
+                Powrót
+              </button>
+            </div>
+
+            {selectedNotification ? (
+              <div className="card shadow-sm bg-body-tertiary">
+                <div className="card-header d-flex justify-content-between align-items-center bg-transparent py-3">
+                   <h5 className="mb-0">{selectedNotification.title}</h5>
+                   <span className={`badge ${getNotifBadgeClass(selectedNotification.priority)}`}>{selectedNotification.priority.toUpperCase()}</span>
+                </div>
+                <div className="card-body">
+                   <p className="fs-5">{selectedNotification.message}</p>
+                   <hr />
+                   <small className="text-muted">Data otrzymania: {new Date(selectedNotification.date).toLocaleString()}</small>
+                </div>
+                <div className="card-footer bg-transparent py-3">
+                   <button className="btn btn-secondary btn-sm" onClick={() => setSelectedNotification(null)}>⬅ Wróć do listy</button>
+                </div>
+              </div>
+            ) : (
+              <div className="list-group shadow-sm">
+                {notifications.length === 0 ? (
+                  <div className="alert alert-info border-0">Brak powiadomień na Twoim koncie.</div>
+                ) : (
+                  notifications.map(notif => (
+                    <div 
+                      key={notif.id} 
+                      className={`list-group-item list-group-item-action d-flex flex-column flex-md-row justify-content-between align-items-start align-items-md-center p-3 ${!notif.isRead ? 'bg-primary bg-opacity-10' : 'bg-body-tertiary'}`}
+                      style={{ cursor: 'pointer' }}
+                      onClick={() => handleNotificationClick(notif)}
+                    >
+                      <div className="mb-2 mb-md-0">
+                        <div className="d-flex align-items-center gap-2 mb-1">
+                          <span className={!notif.isRead ? 'fw-bold' : ''}>{notif.title}</span>
+                          {!notif.isRead && <span className="badge bg-primary rounded-pill" style={{fontSize: '0.65rem'}}>Nowe</span>}
+                        </div>
+                        <small className="text-muted fw-normal">{new Date(notif.date).toLocaleString()}</small>
+                      </div>
+                      <div className="d-flex align-items-center gap-3">
+                        <span className={`badge ${getNotifBadgeClass(notif.priority)}`}>{notif.priority}</span>
+                        {!notif.isRead && (
+                          <button 
+                            className="btn btn-sm btn-outline-success"
+                            onClick={(e) => handleMarkAsRead(e, notif.id)}
+                          >
+                            ✓ Przeczytane
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+
+      ) : !activeProject ? (
         <div className="row justify-content-center">
           <div className="col-md-8">
             <h2 className="h4 mb-3">Lista Projektów</h2>
             <div className="card shadow-sm mb-4 bg-body-tertiary border-0">
               <div className="card-body">
                 <form onSubmit={handleSubmit}>
-                  <div className="mb-3">
-                    <input type="text" className="form-control" placeholder="Nazwa projektu" value={nazwa} onChange={(e) => setNazwa(e.target.value)} />
-                  </div>
-                  <div className="mb-3">
-                    <textarea className="form-control" placeholder="Opis projektu" value={opis} onChange={(e) => setOpis(e.target.value)} rows={3} />
-                  </div>
+                  <div className="mb-3"><input type="text" className="form-control" placeholder="Nazwa projektu" value={nazwa} onChange={(e) => setNazwa(e.target.value)} /></div>
+                  <div className="mb-3"><textarea className="form-control" placeholder="Opis projektu" value={opis} onChange={(e) => setOpis(e.target.value)} rows={3} /></div>
                   <div className="d-flex gap-2">
                     <button type="submit" className="btn btn-primary">{editingId ? 'Zapisz zmiany' : 'Dodaj projekt'}</button>
                     {editingId && <button type="button" className="btn btn-outline-secondary" onClick={() => { setEditingId(null); setNazwa(''); setOpis(''); }}>Anuluj</button>}
@@ -267,7 +352,6 @@ function App() {
         </div>
 
       ) : !activeStory ? (
-        // WIDOK 2: Tablica Historyjek w Projekcie
         <div>
           <button className="btn btn-link text-decoration-none ps-0 mb-3" onClick={() => setActiveProject(null)}>⬅ Powrót do projektów</button>
           <div className="alert alert-primary shadow-sm mb-4">
@@ -324,7 +408,6 @@ function App() {
         </div>
 
       ) : (
-        // WIDOK 3: Tablica Zadań (Tasków) w Historyjce
         <div>
           <button className="btn btn-link text-decoration-none ps-0 mb-3" onClick={() => { setActiveStory(null); loadStories(); }}>⬅ Powrót do historyjek</button>
           <div className="alert alert-info shadow-sm mb-4">
@@ -339,14 +422,8 @@ function App() {
                 <div className="mb-2"><input type="text" className="form-control form-control-sm" placeholder="Nazwa zadania" value={taskNazwa} onChange={(e) => setTaskNazwa(e.target.value)} /></div>
                 <div className="mb-2"><textarea className="form-control form-control-sm" placeholder="Opis zadania" value={taskOpis} onChange={(e) => setTaskOpis(e.target.value)} rows={2} /></div>
                 <div className="row mb-3">
-                  <div className="col">
-                    <select className="form-select form-select-sm" value={taskPriorytet} onChange={(e) => setTaskPriorytet(e.target.value as Priority)}>
-                      <option value="niski">Niski</option><option value="średni">Średni</option><option value="wysoki">Wysoki</option>
-                    </select>
-                  </div>
-                  <div className="col">
-                    <input type="number" className="form-control form-control-sm" min="1" placeholder="Czas (h)" value={taskCzas} onChange={(e) => setTaskCzas(Number(e.target.value))} />
-                  </div>
+                  <div className="col"><select className="form-select form-select-sm" value={taskPriorytet} onChange={(e) => setTaskPriorytet(e.target.value as Priority)}><option value="niski">Niski</option><option value="średni">Średni</option><option value="wysoki">Wysoki</option></select></div>
+                  <div className="col"><input type="number" className="form-control form-control-sm" min="1" placeholder="Czas (h)" value={taskCzas} onChange={(e) => setTaskCzas(Number(e.target.value))} /></div>
                 </div>
                 <div className="d-flex gap-2">
                   <button type="submit" className="btn btn-sm btn-secondary" style={{ backgroundColor: 'purple', borderColor: 'purple', color: 'white' }}>{editingTaskId ? 'Zapisz' : 'Dodaj zadanie'}</button>
@@ -357,7 +434,6 @@ function App() {
           </div>
 
           <div className="row g-3">
-            {/* TODO KOLUMNA */}
             <div className="col-12 col-md-4">
               <div className="bg-body-tertiary p-3 rounded shadow-sm h-100 border">
                 <h4 className="h6 text-uppercase fw-bold mb-3 border-bottom pb-2">TODO</h4>
@@ -384,7 +460,6 @@ function App() {
               </div>
             </div>
 
-            {/* DOING KOLUMNA */}
             <div className="col-12 col-md-4">
               <div className="bg-body-tertiary p-3 rounded shadow-sm h-100 border border-warning border-opacity-50">
                 <h4 className="h6 text-uppercase fw-bold mb-3 border-bottom pb-2">DOING</h4>
@@ -401,7 +476,6 @@ function App() {
               </div>
             </div>
 
-            {/* DONE KOLUMNA */}
             <div className="col-12 col-md-4">
               <div className="bg-body-tertiary p-3 rounded shadow-sm h-100 border border-success border-opacity-25">
                 <h4 className="h6 text-uppercase fw-bold mb-3 border-bottom pb-2">DONE</h4>
@@ -415,6 +489,22 @@ function App() {
                   </div>
                 ))}
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showToast && (
+        <div className="toast-container position-fixed bottom-0 end-0 p-3" style={{ zIndex: 1050 }}>
+          <div className="toast show" role="alert" aria-live="assertive" aria-atomic="true">
+            <div className={`toast-header text-white ${showToast.priority === 'high' ? 'bg-danger' : 'bg-warning text-dark'}`}>
+              <strong className="me-auto">Nowe powiadomienie ({showToast.priority})</strong>
+              <small>{new Date(showToast.date).toLocaleTimeString()}</small>
+              <button type="button" className="btn-close btn-close-white ms-2" onClick={() => setShowToast(null)}></button>
+            </div>
+            <div className="toast-body bg-body-tertiary text-body">
+              <strong>{showToast.title}</strong><br/>
+              {showToast.message}
             </div>
           </div>
         </div>
